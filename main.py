@@ -68,13 +68,20 @@ def infer_profile_from_comments(comments: list[dict]):
     print(f"Pre-send token count: {token_estimate}")
 
 
-@click.command()
+@click.group()
+def cli():
+    """HN Profiles - Analyze Hacker News user profiles"""
+    pass
+
+
+@cli.command()
 @click.argument("username", type=str)
-def main(username):
+def about(username):
+    """Tell me about this user"""
     user = get_user(username)
     comments = get_all_user_comments(user['submitted'])
     infer_profile_from_comments(comments)
 
 
 if __name__ == '__main__':
-    main()
+    cli()
