@@ -3,19 +3,66 @@ import requests
 import json
 import tiktoken
 import re
+import os
+import hashlib
+from pathlib import Path
 from tqdm import tqdm
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 HN_API_URL = "https://hacker-news.firebaseio.com/v0"
 SUBMIT_LIMIT = 300
+CACHE_DIR = Path(".cache")
 
 model = ChatOpenAI(model="gpt-4.1-mini")
 enc = tiktoken.encoding_for_model("gpt-4o")
 
+# Ensure cache directory exists
+CACHE_DIR.mkdir(exist_ok=True)
+(CACHE_DIR / "hn_api").mkdir(exist_ok=True)
+(CACHE_DIR / "openai").mkdir(exist_ok=True)
+
 
 def count_tokens_for_input(input_str: str) -> int:
     return len(enc.encode(input_str))
+
+
+def get_cache_key(data: str) -> str:
+    """Generate a cache key from data"""
+    return hashlib.md5(data.encode()).hexdigest()
+
+
+def load_from_cache(cache_file: Path) -> dict:
+    """Load data from cache file if it exists"""
+    if cache_file.exists():
+        with open(cache_file, 'r') as f:
+            return json.load(f)
+    return None
+
+
+def save_to_cache(cache_file: Path, data: dict) -> None:
+    """Save data to cache file"""
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_file, 'w') as f:
+        json.dump(data, f)
+
+
+def cached_request(url: str, use_cache: bool = True) -> dict:
+    """Make a cached HTTP request to HN API"""
+    cache_key = get_cache_key(url)
+    cache_file = CACHE_DIR / "hn_api" / f"{cache_key}.json"
+    
+    # Try to load from cache first if use_cache is True
+    if use_cache:
+        cached_data = load_from_cache(cache_file)
+        if cached_data is not None:
+            return cached_data
+    
+    # Make actual request and cache result
+    response = requests.get(url)
+    data = response.json()
+    save_to_cache(cache_file, data)
+    return data
 
 
 def extract_story_id(url: str) -> int:
@@ -26,18 +73,28 @@ def extract_story_id(url: str) -> int:
     return int(match.group(1))
 
 
-def get_story_item(story_id: int) -> dict:
-    """Fetch story item from HN API"""
+def get_story_item(story_id: int, use_cache: bool = True) -> dict:
+    """Fetch story item from HN API with caching"""
+    url = f"{HN_API_URL}/item/{story_id}.json"
+    
+    if use_cache:
+        cache_key = get_cache_key(url)
+        cache_file = CACHE_DIR / "hn_api" / f"{cache_key}.json"
+        cached_data = load_from_cache(cache_file)
+        if cached_data is not None:
+            click.echo(f"Loading story {story_id} from cache...")
+            return cached_data
+    
     click.echo(f"Fetching story {story_id}...")
-    res = requests.get(f"{HN_API_URL}/item/{story_id}.json").json()
+    res = cached_request(url, use_cache)
     if not res:
         raise ValueError(f"Story {story_id} not found")
     return res
 
 
-def fetch_comment_recursively(comment_id: int, comments_dict: dict, depth: int = 0) -> dict:
-    """Recursively fetch a comment and all its children"""
-    res = requests.get(f"{HN_API_URL}/item/{comment_id}.json").json()
+def fetch_comment_recursively(comment_id: int, comments_dict: dict, depth: int = 0, use_cache: bool = True) -> dict:
+    """Recursively fetch a comment and all its children with caching"""
+    res = cached_request(f"{HN_API_URL}/item/{comment_id}.json", use_cache)
     
     if not res or res.get('deleted') or res.get('dead'):
         return None
@@ -55,7 +112,7 @@ def fetch_comment_recursively(comment_id: int, comments_dict: dict, depth: int =
     # Recursively fetch children
     if 'kids' in res:
         for kid_id in res['kids']:
-            child = fetch_comment_recursively(kid_id, comments_dict, depth + 1)
+            child = fetch_comment_recursively(kid_id, comments_dict, depth + 1, use_cache)
             if child:
                 comment['children'].append(child)
     
@@ -63,8 +120,8 @@ def fetch_comment_recursively(comment_id: int, comments_dict: dict, depth: int =
     return comment
 
 
-def fetch_all_story_comments(story: dict) -> dict:
-    """Fetch all comments for a story recursively"""
+def fetch_all_story_comments(story: dict, use_cache: bool = True) -> dict:
+    """Fetch all comments for a story recursively with caching"""
     comments_dict = {}
     root_comments = []
     
@@ -76,7 +133,7 @@ def fetch_all_story_comments(story: dict) -> dict:
     
     with tqdm(total=len(story['kids']), desc="Fetching comment trees", unit="trees") as pbar:
         for comment_id in story['kids']:
-            comment = fetch_comment_recursively(comment_id, comments_dict, 0)
+            comment = fetch_comment_recursively(comment_id, comments_dict, 0, use_cache)
             if comment:
                 root_comments.append(comment)
             pbar.update(1)
@@ -120,7 +177,7 @@ def format_comments_for_llm(story: dict, comments_data: dict) -> str:
     return story_text
 
 
-def get_all_user_comments(submits: list[int]) -> list[dict]:
+def get_all_user_comments(submits: list[int], use_cache: bool = True) -> list[dict]:
     comments = []
     total_comments = 0
     
@@ -131,7 +188,7 @@ def get_all_user_comments(submits: list[int]) -> list[dict]:
             if total_comments >= SUBMIT_LIMIT:
                 break
 
-            res = requests.get(f"{HN_API_URL}/item/{submitted}.json").json()
+            res = cached_request(f"{HN_API_URL}/item/{submitted}.json", use_cache)
             if res and res.get('type') == 'comment':
                 comments.append(res)
                 total_comments += 1
@@ -143,16 +200,54 @@ def get_all_user_comments(submits: list[int]) -> list[dict]:
     return comments
 
 
-def get_user(username: str) -> dict:
-    click.echo(f"Fetching user profile for '{username}'...")
+def get_user(username: str, use_cache: bool = True) -> dict:
     user_api_url = f"{HN_API_URL}/user/{username}.json"
-    res = requests.get(user_api_url).json()
+    
+    if use_cache:
+        cache_key = get_cache_key(user_api_url)
+        cache_file = CACHE_DIR / "hn_api" / f"{cache_key}.json"
+        cached_data = load_from_cache(cache_file)
+        if cached_data is not None:
+            click.echo(f"Loading user profile for '{username}' from cache...")
+            if cached_data:
+                click.echo(f"Found user with {len(cached_data.get('submitted', []))} total submissions")
+            return cached_data
+    
+    click.echo(f"Fetching user profile for '{username}'...")
+    res = cached_request(user_api_url, use_cache)
     if res:
         click.echo(f"Found user with {len(res.get('submitted', []))} total submissions")
     return res
 
 
-def infer_profile_from_comments(comments: list[dict]):
+def cached_openai_request(messages: list, cache_key: str, use_cache: bool = True) -> tuple[dict, bool]:
+    """Make a cached OpenAI request"""
+    cache_file = CACHE_DIR / "openai" / f"{cache_key}.json"
+    
+    if use_cache:
+        cached_data = load_from_cache(cache_file)
+        if cached_data is not None:
+            click.echo("Loading AI analysis from cache...")
+            return cached_data, True
+    
+    # Make actual OpenAI request
+    aggregate = None
+    content_parts = []
+    for chunk in model.stream(messages, stream_usage=True):
+        print(chunk.content, end="")
+        content_parts.append(chunk.content)
+        aggregate = chunk if aggregate is None else aggregate + chunk
+    
+    # Cache the result
+    result = {
+        'content': ''.join(content_parts),
+        'usage_metadata': aggregate.usage_metadata
+    }
+    save_to_cache(cache_file, result)
+    return result, False
+
+
+def infer_profile_from_comments(comments: list[dict], use_cache: bool = True):
     prompt = """
     Based on the Hacker News comments, make an educated guess of the user's profile. Your output should be in the following format:
     Profile: {username}
@@ -165,6 +260,9 @@ def infer_profile_from_comments(comments: list[dict]):
     """
     total_input = prompt + json.dumps(comments)
     token_estimate = count_tokens_for_input(total_input)
+    
+    # Create cache key from input content
+    cache_key = get_cache_key(total_input)
 
     click.echo(f"Analyzing {len(comments)} comments with AI (estimated {token_estimate:,} tokens)...")
     
@@ -173,14 +271,16 @@ def infer_profile_from_comments(comments: list[dict]):
         HumanMessage(json.dumps(comments)),
     ]
 
-    aggregate = None
-    for chunk in model.stream(messages, stream_usage=True):
-        print(chunk.content, end="")
-        aggregate = chunk if aggregate is None else aggregate + chunk
+    result, cache_hit = cached_openai_request(messages, cache_key, use_cache)
 
+    if cache_hit:
+        print()
+        print(result["content"])
+    if not result['content'].endswith('\n'):
+        print()
     print("\n-------------------")
     print("Usage:")
-    print(json.dumps(aggregate.usage_metadata, indent=2))
+    print(json.dumps(result['usage_metadata'], indent=2))
     print("\n--------------------")
     print(f"Pre-send token count: {token_estimate}")
 
@@ -193,10 +293,12 @@ def cli():
 
 @cli.command()
 @click.argument("username", type=str)
-def about(username):
+@click.option("--nocache", is_flag=True, help="Skip cache and make fresh requests")
+def about(username, nocache):
     """Tell me about this user"""
-    user = get_user(username)
-    comments = get_all_user_comments(user['submitted'])
+    use_cache = not nocache
+    user = get_user(username, use_cache)
+    comments = get_all_user_comments(user['submitted'], use_cache)
     
     prompt = """
     Based on the Hacker News comments, make an educated guess of the user's profile. Your output should be in the following format:
@@ -219,12 +321,13 @@ def about(username):
             click.echo("Request cancelled.")
             return
     
-    infer_profile_from_comments(comments)
+    infer_profile_from_comments(comments, use_cache)
 
 
 @cli.command()
 @click.argument("story_url", type=str)
-def analyze_story(story_url):
+@click.option("--nocache", is_flag=True, help="Skip cache and make fresh requests")
+def analyze_story(story_url, nocache):
     """Analyze all comments on a Hacker News story"""
     try:
         story_id = extract_story_id(story_url)
@@ -232,9 +335,10 @@ def analyze_story(story_url):
         click.echo(f"Error: {e}")
         return
     
+    use_cache = not nocache
     # Fetch story and comments
-    story = get_story_item(story_id)
-    comments_data = fetch_all_story_comments(story)
+    story = get_story_item(story_id, use_cache)
+    comments_data = fetch_all_story_comments(story, use_cache)
     
     if comments_data['total_count'] == 0:
         click.echo("No comments to analyze.")
@@ -275,11 +379,21 @@ def analyze_story(story_url):
         HumanMessage(formatted_text),
     ]
     
-    aggregate = None
-    for chunk in model.stream(messages, stream_usage=True):
-        print(chunk.content, end="")
-        aggregate = chunk if aggregate is None else aggregate + chunk
+    # Create cache key from input content
+    cache_key = get_cache_key(prompt + formatted_text)
+    result, cache_hit = cached_openai_request(messages, cache_key, use_cache)
     
+    # Create aggregate-like object for compatibility
+    class MockAggregate:
+        def __init__(self, content, usage_metadata):
+            self.content = content
+            self.usage_metadata = usage_metadata
+    
+    aggregate = MockAggregate(result['content'], result['usage_metadata'])
+
+    if cache_hit:
+        print()
+        print(result['content'])
     print("\n" + "="*80)
     print("ANALYSIS COMPLETE")
     print("="*80)

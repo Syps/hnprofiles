@@ -48,3 +48,12 @@ python main.py <username>
 - **Hacker News API**: `https://hacker-news.firebaseio.com/v0`
 - **OpenAI**: Uses `gpt-4o-mini` model via langchain
 - Rate limiting: Processes max 30 user submissions
+
+## Caching
+
+- **Cache Directory**: `.cache/` (created automatically)
+- **HN API Cache**: `.cache/hn_api/` - Caches all API responses from Hacker News
+- **OpenAI Cache**: `.cache/openai/` - Caches AI analysis results
+- **Cache Keys**: MD5 hash of request content for deterministic caching
+- **Benefits**: Reduces API costs and improves development speed during testing
+- **Cache Control**: Use `--nocache` flag on commands to skip cache and make fresh requests
