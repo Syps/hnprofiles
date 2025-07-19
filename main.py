@@ -349,16 +349,13 @@ def analyze_story(story_url, nocache):
     
     # Check token count
     prompt = """
-    Analyze the following Hacker News story and its comments. Provide a comprehensive overview that includes:
+    Analyze the following Hacker News story and its comments. Provide a concise overview that includes:
     
-    1. **Main Topic**: What is the story about?
-    2. **Key Themes**: What are the main themes/topics being discussed in the comments?
-    3. **Popular Opinions**: What are the most common viewpoints or opinions expressed?
-    4. **Notable Insights**: Any particularly interesting insights, anecdotes, or technical details shared?
-    5. **Debate Points**: What are people debating or disagreeing about?
-    6. **Overall Sentiment**: What's the general tone of the discussion?
-    
-    Make this overview concise but comprehensive enough that someone could understand the essence of the entire comment thread without reading all the individual comments.
+    1. **Main Topic**: What is the story about? 1-2 bullets
+    2. **Key Themes**: What are the main themes/topics being discussed in the comments? 2-4 bullets
+    3. **Popular Opinions**: What are the most common viewpoints or opinions expressed? 3 max, as bullets. For each, provide a link to the most popular comment supporting that point.
+    5. **Debate Points**: What are people debating or disagreeing about? Only include if there's repeated disagreement in the comments. Include 1 short bullet per side.
+    6. **Overall Sentiment**: What's the general tone of the discussion? 5 words max
     """
     
     total_input = prompt + formatted_text
