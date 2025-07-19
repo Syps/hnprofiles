@@ -9,7 +9,7 @@ This is a Python CLI tool that analyzes Hacker News user profiles by fetching th
 ## Architecture
 
 - **Single module design**: The entire application is contained in `main.py`
-- **Virtual environment**: Uses `hn-profiles/` venv with Python 3.11
+- **Virtual environment**: Uses `hnprofiles/` venv with Python 3.11
 - **Dependencies**: Managed via `uv` with `requirements.in` source and compiled `requirements.txt`
 - **Key libraries**: 
   - `langchain-openai` for LLM integration
@@ -40,7 +40,7 @@ python main.py <username>
 ## Environment Requirements
 
 - Requires OpenAI API key (set as environment variable)
-- Python 3.11+ with virtual environment in `hn-profiles/`
+- Python 3.11+ with virtual environment in `hnprofiles/`
 - Dependencies managed with `uv` package manager
 
 ## API Integration
