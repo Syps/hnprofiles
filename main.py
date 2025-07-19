@@ -9,6 +9,10 @@ from pathlib import Path
 from tqdm import tqdm
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 
 HN_API_URL = "https://hacker-news.firebaseio.com/v0"
 SUBMIT_LIMIT = 300
@@ -16,6 +20,7 @@ CACHE_DIR = Path(".cache")
 
 model = ChatOpenAI(model="gpt-4.1-mini")
 enc = tiktoken.encoding_for_model("gpt-4o")
+console = Console()
 
 # Ensure cache directory exists
 CACHE_DIR.mkdir(exist_ok=True)
@@ -220,6 +225,12 @@ def get_user(username: str, use_cache: bool = True) -> dict:
     return res
 
 
+def render_analysis_output(content: str):
+    """Render AI analysis output with rich formatting"""
+    console.print()
+    console.print(Markdown(content))
+
+
 def cached_openai_request(messages: list, cache_key: str, use_cache: bool = True) -> tuple[dict, bool]:
     """Make a cached OpenAI request"""
     cache_file = CACHE_DIR / "openai" / f"{cache_key}.json"
@@ -233,14 +244,20 @@ def cached_openai_request(messages: list, cache_key: str, use_cache: bool = True
     # Make actual OpenAI request
     aggregate = None
     content_parts = []
+    
+    # Stream output and collect content
+    console.print()
     for chunk in model.stream(messages, stream_usage=True):
-        print(chunk.content, end="")
         content_parts.append(chunk.content)
         aggregate = chunk if aggregate is None else aggregate + chunk
     
+    # Render the complete content with markdown formatting
+    full_content = ''.join(content_parts)
+    console.print(Markdown(full_content))
+    
     # Cache the result
     result = {
-        'content': ''.join(content_parts),
+        'content': full_content,
         'usage_metadata': aggregate.usage_metadata
     }
     save_to_cache(cache_file, result)
@@ -389,15 +406,23 @@ def analyze_story(story_url, nocache):
     aggregate = MockAggregate(result['content'], result['usage_metadata'])
 
     if cache_hit:
-        print()
-        print(result['content'])
-    print("\n" + "="*80)
-    print("ANALYSIS COMPLETE")
-    print("="*80)
-    print(f"Story: {story.get('title', 'No title')}")
-    print(f"Total comments analyzed: {comments_data['total_count']}")
-    print(f"Token usage: {json.dumps(aggregate.usage_metadata, indent=2)}")
-    print(f"Pre-send token estimate: {token_count:,}")
+        console.print()
+        console.print(Markdown(result['content']))
+    
+    # Create story summary panel
+    story_info = Text()
+    story_info.append(f"Story: {story.get('title', 'No title')}\n", style="bold cyan")
+    story_info.append(f"Total comments analyzed: {comments_data['total_count']}\n", style="green")
+    story_info.append(f"Pre-send token estimate: {token_count:,}\n", style="yellow")
+    story_info.append(f"Token usage: {json.dumps(aggregate.usage_metadata, indent=2)}", style="dim")
+    
+    console.print()
+    console.print(Panel(
+        story_info,
+        title="[bold green]Analysis Complete[/bold green]",
+        border_style="green",
+        padding=(1, 2)
+    ))
 
 
 if __name__ == '__main__':
