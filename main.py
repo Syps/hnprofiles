@@ -370,7 +370,7 @@ def analyze_story(story_url, nocache):
     
     1. **Main Topic**: What is the story about? 1-2 bullets
     2. **Key Themes**: What are the main themes/topics being discussed in the comments? 2-4 bullets
-    3. **Popular Opinions**: What are the most common viewpoints or opinions expressed? 3 max, as bullets. For each, provide a link to the most popular comment supporting that point.
+    3. **Popular Opinions**: What are the most common viewpoints or opinions expressed? 3 max, as bullets. For each, provide a link to the most popular comment supporting that point. To build the link, just add the comment id (comment['id']) to the end of the base URL `https://news.ycombinator.com/item?id=`.
     5. **Debate Points**: What are people debating or disagreeing about? Only include if there's repeated disagreement in the comments. Include 1 short bullet per side.
     6. **Overall Sentiment**: What's the general tone of the discussion? 5 words max
     """
