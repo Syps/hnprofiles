@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
+from langchain_ollama import OllamaLLM
 
 HN_API_URL = "https://hacker-news.firebaseio.com/v0"
 SUBMIT_LIMIT = 300
@@ -22,10 +23,19 @@ model = ChatOpenAI(model="gpt-4.1-mini")
 enc = tiktoken.encoding_for_model("gpt-4o")
 console = Console()
 
+# Initialize Ollama for text extraction
+ollama_model = OllamaLLM(
+    model="llama3.1:8b",
+    base_url="http://127.0.0.1:11434"
+)
+
 # Ensure cache directory exists
 CACHE_DIR.mkdir(exist_ok=True)
 (CACHE_DIR / "hn_api").mkdir(exist_ok=True)
 (CACHE_DIR / "openai").mkdir(exist_ok=True)
+(CACHE_DIR / "web_content").mkdir(exist_ok=True)
+
+TOKEN_CONFIRM_THRESHOLD = 50_000
 
 
 def count_tokens_for_input(input_str: str) -> int:
@@ -64,10 +74,46 @@ def cached_request(url: str, use_cache: bool = True) -> dict:
             return cached_data
     
     # Make actual request and cache result
-    response = requests.get(url)
+    response = requests.get(url, headers={
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0',
+    })
     data = response.json()
     save_to_cache(cache_file, data)
     return data
+
+
+def cached_web_request(url: str, use_cache: bool = True) -> str:
+    """Make a cached HTTP request for web content"""
+    cache_key = get_cache_key(url)
+    cache_file = CACHE_DIR / "web_content" / f"{cache_key}.json"
+    
+    if use_cache:
+        cached_data = load_from_cache(cache_file)
+        if cached_data is not None:
+            click.echo(f"Loading webpage content from cache...")
+            return cached_data.get('content', '')
+    
+    click.echo(f"Fetching webpage: {url}")
+    try:
+        response = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0 (compatible; HNProfiles/1.0)'})
+        response.raise_for_status()
+        content = response.text
+        
+        # Cache the result
+        save_to_cache(cache_file, {'content': content, 'url': url})
+        return content
+    except requests.RequestException as e:
+        raise ValueError(f"Failed to fetch webpage: {e}")
 
 
 def extract_story_id(url: str) -> int:
@@ -76,6 +122,18 @@ def extract_story_id(url: str) -> int:
     if not match:
         raise ValueError(f"Could not extract story ID from URL: {url}")
     return int(match.group(1))
+
+
+def parse_story_input(story_input: str) -> int:
+    """Parse story input - can be URL or direct ID"""
+    # If it's a URL, extract the ID
+    if story_input.startswith('http'):
+        return extract_story_id(story_input)
+    # If it's just a number, use it directly
+    try:
+        return int(story_input)
+    except ValueError:
+        raise ValueError(f"Invalid story input: {story_input}. Must be HN URL or story ID.")
 
 
 def get_story_item(story_id: int, use_cache: bool = True) -> dict:
@@ -225,6 +283,29 @@ def get_user(username: str, use_cache: bool = True) -> dict:
     return res
 
 
+def extract_text_from_html(html_content: str) -> str:
+    """Extract clean text from HTML using Ollama llama3.1:8b"""
+    prompt = """Extract the main article text content from this HTML webpage. 
+    
+Rules:
+- Return ONLY the main article/story text content
+- Remove all HTML tags, CSS, JavaScript, navigation menus, ads, sidebars, and footer content  
+- Remove social media buttons, comments sections, and related articles
+- Keep only the core readable text that represents the main article
+- Preserve paragraph breaks with double newlines
+- Do not include any explanations or metadata, just the clean text
+
+HTML content:
+"""
+    
+    try:
+        click.echo("Extracting text content using Ollama...")
+        extracted_text = ollama_model.invoke(prompt + html_content[:50000])  # Limit HTML size
+        return extracted_text.strip()
+    except Exception as e:
+        raise ValueError(f"Failed to extract text using Ollama: {e}")
+
+
 def render_analysis_output(content: str):
     """Render AI analysis output with rich formatting"""
     console.print()
@@ -330,7 +411,7 @@ def about(username, nocache):
     total_input = prompt + json.dumps(comments)
     token_count = count_tokens_for_input(total_input)
     
-    if token_count > 50000:
+    if token_count > TOKEN_CONFIRM_THRESHOLD:
         estimated_cost = (token_count / 1_000_000) * 0.40
         click.echo(f"Token count: {token_count:,}")
         click.echo(f"Estimated cost: ${estimated_cost:.4f}")
@@ -378,7 +459,7 @@ def analyze_story(story_url, nocache):
     total_input = prompt + formatted_text
     token_count = count_tokens_for_input(total_input)
     
-    if token_count > 50000:
+    if token_count > TOKEN_CONFIRM_THRESHOLD:
         estimated_cost = (token_count / 1_000_000) * 0.40
         click.echo(f"Token count: {token_count:,}")
         click.echo(f"Estimated cost: ${estimated_cost:.4f}")
@@ -423,6 +504,104 @@ def analyze_story(story_url, nocache):
         border_style="green",
         padding=(1, 2)
     ))
+
+
+@cli.command()
+@click.argument("story_input", type=str)
+@click.option("--nocache", is_flag=True, help="Skip cache and make fresh requests")
+def summarize_story(story_input, nocache):
+    """Summarize the content of a Hacker News story URL"""
+    use_cache = not nocache
+    
+    try:
+        # Parse story input (URL or ID)
+        story_id = parse_story_input(story_input)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        return
+    
+    try:
+        # Fetch story from HN API
+        story = get_story_item(story_id, use_cache)
+        
+        # Check if story has URL
+        if not story.get('url'):
+            console.print(f"[red]Error:[/red] Story {story_id} does not have a URL to summarize")
+            console.print(f"Story title: {story.get('title', 'No title')}")
+            return
+        
+        story_url = story['url']
+        console.print(f"[bold cyan]Story:[/bold cyan] {story.get('title', 'No title')}")
+        console.print(f"[bold cyan]URL:[/bold cyan] {story_url}")
+        console.print()
+        
+        # Fetch webpage content
+        try:
+            html_content = cached_web_request(story_url, use_cache)
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            return
+        
+        # Extract text using Ollama
+        try:
+            extracted_text = extract_text_from_html(html_content)
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            return
+        
+        # Create summarization prompt
+        summary_prompt = """Please provide a concise one-paragraph summary of the following article. 
+        Focus on the main points, key findings, and important details. Make it informative but readable.
+        
+        Article text:
+        """
+        
+        total_input = summary_prompt + extracted_text
+        token_estimate = count_tokens_for_input(total_input)
+        
+        # Check token count and cost
+        if token_estimate > TOKEN_CONFIRM_THRESHOLD:
+            estimated_cost = (token_estimate / 1_000_000) * 0.40
+            console.print(f"[yellow]Warning:[/yellow] Large content detected")
+            console.print(f"Token count: {token_estimate:,}")
+            console.print(f"Estimated cost: ${estimated_cost:.4f}")
+            if not click.confirm("Continue with summarization?"):
+                console.print("Summarization cancelled.")
+                return
+        
+        console.print(f"Generating summary... (estimated {token_estimate:,} tokens)")
+        
+        # Generate summary using OpenAI
+        messages = [
+            SystemMessage(summary_prompt),
+            HumanMessage(extracted_text),
+        ]
+        
+        cache_key = get_cache_key(total_input)
+        result, cache_hit = cached_openai_request(messages, cache_key, use_cache)
+        
+        # Display results
+        if cache_hit:
+            console.print()
+            console.print(Markdown(result['content']))
+        
+        # Create summary panel
+        summary_info = Text()
+        summary_info.append(f"Story: {story.get('title', 'No title')}\n", style="bold cyan")
+        summary_info.append(f"Original URL: {story_url}\n", style="blue")
+        summary_info.append(f"Token usage: {json.dumps(result['usage_metadata'], indent=2)}\n", style="dim")
+        summary_info.append(f"Pre-send token estimate: {token_estimate:,}", style="yellow")
+        
+        console.print()
+        console.print(Panel(
+            summary_info,
+            title="[bold green]Summary Complete[/bold green]",
+            border_style="green",
+            padding=(1, 2)
+        ))
+        
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
 
 
 if __name__ == '__main__':
