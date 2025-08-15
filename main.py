@@ -19,13 +19,16 @@ HN_API_URL = "https://hacker-news.firebaseio.com/v0"
 SUBMIT_LIMIT = 300
 CACHE_DIR = Path(".cache")
 
-model = ChatOpenAI(model="gpt-4.1-mini")
+LOCAL_LLM = "gpt-oss:20b"
+CLOUD_LLM = "gpt-4.1-mini"
+
+model = ChatOpenAI(model=CLOUD_LLM)
 enc = tiktoken.encoding_for_model("gpt-4o")
 console = Console()
 
 # Initialize Ollama for text extraction
 ollama_model = OllamaLLM(
-    model="llama3.1:8b",
+    model=LOCAL_LLM,
     base_url="http://127.0.0.1:11434"
 )
 
