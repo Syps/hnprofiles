@@ -108,7 +108,7 @@ def cached_web_request(url: str, use_cache: bool = True) -> str:
     
     click.echo(f"Fetching webpage: {url}")
     try:
-        response = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0 (compatible; HNProfiles/1.0)'})
+        response = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0 (compatible; HNProfiles/1.0)'})
         response.raise_for_status()
         content = response.text
         
@@ -302,11 +302,114 @@ HTML content:
 """
     
     try:
-        click.echo("Extracting text content using Ollama...")
+        click.echo(f"Extracting text content using {LOCAL_LLM}...")
         extracted_text = ollama_model.invoke(prompt + html_content[:50000])  # Limit HTML size
         return extracted_text.strip()
     except Exception as e:
         raise ValueError(f"Failed to extract text using Ollama: {e}")
+
+
+def scrape_hn_profile(username: str, use_cache: bool = True) -> dict:
+    """Scrape HN user profile page and extract key information"""
+    profile_url = f"https://news.ycombinator.com/user?id={username.strip()}"
+    
+    try:
+        # Use existing web request caching
+        html_content = cached_web_request(profile_url, use_cache)
+        
+        # Parse HTML to extract profile data
+        profile_data = {
+            'created': None,
+            'karma': None,
+            'about': None
+        }
+        
+        # Extract created date - looks for the link with date
+        created_match = re.search(r'<td valign="top">created:</td><td><a[^>]*>([^<]+)</a></td>', html_content)
+        if created_match:
+            profile_data['created'] = created_match.group(1).strip()
+        
+        # Extract karma - between karma td tags
+        karma_match = re.search(r'<td valign="top">karma:</td><td>(\d+)</td>', html_content)
+        if karma_match:
+            profile_data['karma'] = int(karma_match.group(1))
+        
+        # Extract about section - more complex because it contains HTML
+        about_match = re.search(r'<td valign="top">about:</td><td[^>]*>(.*?)</td>', html_content, re.DOTALL)
+        if about_match:
+            about_html = about_match.group(1)
+            # Clean up the about HTML
+            # First decode HTML entities
+            about_text = about_html.replace('&#x2F;', '/').replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+            # Remove HTML tags but preserve line breaks
+            about_text = re.sub(r'<p>', '\n', about_text)
+            about_text = re.sub(r'<[^>]+>', '', about_text)
+            # Clean up whitespace
+            about_text = about_text.strip()
+            profile_data['about'] = about_text if about_text else None
+        
+        return profile_data
+        
+    except Exception as e:
+        click.echo(f"Warning: Failed to scrape HN profile: {e}")
+        return {'created': None, 'karma': None, 'about': None}
+
+
+def detect_personal_blog(about_text: str) -> str:
+    """Use LOCAL_LLM to detect personal blog URL from HN about section"""
+    if not about_text:
+        return None
+    
+    prompt = f"""Analyze the following HN user's "about" section and identify if there's a personal blog URL.
+
+Rules:
+- Look for URLs that appear to be personal blogs, websites, or portfolios
+- EXCLUDE: GitHub, Twitter, LinkedIn, Facebook, Instagram, YouTube, Reddit, and other social media
+- EXCLUDE: Company websites, documentation sites, Wikipedia links
+- INCLUDE: Personal domains and personal GitHub Pages sites
+- Return ONLY the URL if found, or "NONE" if no personal blog is detected
+- Do not include any explanations or additional text
+
+About section:
+{about_text}"""
+
+    try:
+        click.echo("Analyzing profile for personal blog...")
+        result = ollama_model.invoke(prompt)
+        result = result.strip()
+        
+        # Check if result looks like a URL and isn't "NONE"
+        if result and result != "NONE" and ("http" in result or "www." in result):
+            # Clean up the result - extract just the URL
+            url_match = re.search(r'https?://[^\s<>"\'\)]+|www\.[^\s<>"\'\)]+', result)
+            if url_match:
+                url = url_match.group(0)
+                # Add https:// if missing
+                if not url.startswith('http'):
+                    url = 'https://' + url
+                return url
+        
+        return None
+        
+    except Exception as e:
+        click.echo(f"Warning: Failed to detect blog URL: {e}")
+        return None
+
+
+def scrape_blog_content(blog_url: str, use_cache: bool = True) -> str:
+    """Scrape blog content using existing web request and text extraction"""
+    try:
+        # Fetch blog HTML using existing caching
+        html_content = cached_web_request(blog_url, use_cache)
+        
+        # Extract text using existing function
+        text_content = extract_text_from_html(html_content)
+        
+        return text_content
+        
+    except Exception as e:
+        click.echo(f"Warning: Failed to scrape blog content: {e}")
+        return None
 
 
 def render_analysis_output(content: str):
@@ -384,3 +487,68 @@ def infer_profile_from_comments(comments: list[dict], use_cache: bool = True):
     print(json.dumps(result['usage_metadata'], indent=2))
     print("\n--------------------")
     print(f"Pre-send token count: {token_estimate}")
+
+
+def infer_profile_from_structured_data(structured_data: str, username: str, use_cache: bool = True, debug: bool = False):
+    """Enhanced profile inference using comments, HN profile, and blog data"""
+    prompt = f"""
+    Based on the comprehensive data about this Hacker News user, make an educated guess of their profile. 
+    Analyze ALL provided data sources to create the most accurate assessment possible.
+    
+    Your output should be in the following format:
+    Profile: {username}
+    -------------------
+    Nationality: {{based on all available evidence}}
+    Age: {{estimated age range or specific age if clear}}
+    Occupation: {{current or likely profession}}
+    Political Leaning: {{if discernible from content}}
+    Interests: {{key interests and hobbies}}
+    
+    Additional Insights: {{any other notable characteristics, writing style, expertise areas, etc.}}
+    """
+    
+    total_input = prompt + structured_data
+    token_estimate = count_tokens_for_input(total_input)
+    
+    # Debug mode: show prompt and ask for confirmation
+    if debug:
+        print("\n" + "="*80)
+        print("DEBUG: PROMPT TO BE SENT TO CLOUD_LLM")
+        print("="*80)
+        print("SYSTEM MESSAGE:")
+        print(prompt)
+        print("\n" + "-"*80)
+        print("USER MESSAGE (STRUCTURED DATA):")
+        print(structured_data[:2000] + ("..." if len(structured_data) > 2000 else ""))
+        print("\n" + "-"*80)
+        print(f"Total input length: {len(total_input):,} characters")
+        print(f"Estimated tokens: {token_estimate:,}")
+        print("="*80)
+        
+        if not click.confirm("Send this prompt to CLOUD_LLM?"):
+            click.echo("Analysis cancelled.")
+            return
+    
+    # Create cache key from input content
+    cache_key = get_cache_key(total_input)
+
+    click.echo(f"Analyzing comprehensive user data with {CLOUD_LLM} (estimated {token_estimate:,} tokens)...")
+    
+    messages = [
+        SystemMessage(prompt),
+        HumanMessage(structured_data),
+    ]
+
+    result, cache_hit = cached_openai_request(messages, cache_key, use_cache)
+
+    if cache_hit:
+        print()
+        print(result["content"])
+    if not result['content'].endswith('\n'):
+        print()
+    print("\n-------------------")
+    print("Usage:")
+    print(json.dumps(result['usage_metadata'], indent=2))
+    print("\n--------------------")
+    print(f"Pre-send token count: {token_estimate}")
+
