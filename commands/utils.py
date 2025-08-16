@@ -14,6 +14,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 from langchain_ollama import OllamaLLM
+import html2text
 
 HN_API_URL = "https://hacker-news.firebaseio.com/v0"
 SUBMIT_LIMIT = 300
@@ -287,26 +288,36 @@ def get_user(username: str, use_cache: bool = True) -> dict:
 
 
 def extract_text_from_html(html_content: str) -> str:
-    """Extract clean text from HTML using Ollama llama3.1:8b"""
-    prompt = """Extract the main article text content from this HTML webpage. 
-    
-Rules:
-- Return ONLY the main article/story text content
-- Remove all HTML tags, CSS, JavaScript, navigation menus, ads, sidebars, and footer content  
-- Remove social media buttons, comments sections, and related articles
-- Keep only the core readable text that represents the main article
-- Preserve paragraph breaks with double newlines
-- Do not include any explanations or metadata, just the clean text
-
-HTML content:
-"""
-    
+    """Extract clean text from HTML using html2text"""
     try:
-        click.echo(f"Extracting text content using {LOCAL_LLM}...")
-        extracted_text = ollama_model.invoke(prompt + html_content[:50000])  # Limit HTML size
-        return extracted_text.strip()
+        click.echo("Extracting text content using html2text...")
+        
+        # Configure html2text for clean output
+        h = html2text.HTML2Text()
+        h.ignore_links = False  # Keep links for context
+        h.ignore_images = True  # Remove images
+        h.ignore_emphasis = False  # Keep bold/italic formatting
+        h.body_width = 0  # Don't wrap lines
+        h.unicode_snob = True  # Use unicode characters
+        h.escape_snob = True  # Escape special characters properly
+        
+        # Convert HTML to clean text
+        text_content = h.handle(html_content)
+        
+        # Clean up extra whitespace while preserving structure
+        lines = text_content.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            line = line.strip()
+            if line:  # Keep non-empty lines
+                cleaned_lines.append(line)
+            elif cleaned_lines and cleaned_lines[-1]:  # Add single empty line for separation
+                cleaned_lines.append('')
+        
+        return '\n'.join(cleaned_lines).strip()
+        
     except Exception as e:
-        raise ValueError(f"Failed to extract text using Ollama: {e}")
+        raise ValueError(f"Failed to extract text using html2text: {e}")
 
 
 def scrape_hn_profile(username: str, use_cache: bool = True) -> dict:
@@ -360,6 +371,22 @@ def detect_personal_blog(about_text: str) -> str:
     if not about_text:
         return None
     
+    # Pre-clean HTML content if present to make LOCAL_LLM more efficient
+    clean_text = about_text
+    if '<' in about_text and '>' in about_text:
+        try:
+            # Use html2text to clean any HTML in the about section
+            h = html2text.HTML2Text()
+            h.ignore_links = False  # Keep links - they're important for blog detection
+            h.ignore_images = True
+            h.ignore_emphasis = True
+            h.body_width = 0
+            h.unicode_snob = True
+            clean_text = h.handle(about_text).strip()
+        except Exception:
+            # If html2text fails, use the original text
+            clean_text = about_text
+    
     prompt = f"""Analyze the following HN user's "about" section and identify if there's a personal blog URL.
 
 Rules:
@@ -371,7 +398,7 @@ Rules:
 - Do not include any explanations or additional text
 
 About section:
-{about_text}"""
+{clean_text}"""
 
     try:
         click.echo("Analyzing profile for personal blog...")
@@ -493,11 +520,15 @@ def infer_profile_from_structured_data(structured_data: str, username: str, use_
     """Enhanced profile inference using comments, HN profile, and blog data"""
     prompt = f"""
     Based on the comprehensive data about this Hacker News user, make an educated guess of their profile. 
-    Analyze ALL provided data sources to create the most accurate assessment possible.
+    Analyze ALL provided data sources to create the most accurate assessment possible. 
+    Make sure to utilize any Blog Content if available. Look there for more info like name, employer, etc.
     
     Your output should be in the following format:
     Profile: {username}
     -------------------
+    Name: {{based on blog content or 'unknown'}}
+    Employer: {{based on all available content or 'unknown'}}'
+    Title: {{based on all available content or 'unknown'}}
     Nationality: {{based on all available evidence}}
     Age: {{estimated age range or specific age if clear}}
     Occupation: {{current or likely profession}}
@@ -508,8 +539,8 @@ def infer_profile_from_structured_data(structured_data: str, username: str, use_
     """
     
     total_input = prompt + structured_data
-    token_estimate = count_tokens_for_input(total_input)
-    
+    token_count = count_tokens_for_input(total_input)
+
     # Debug mode: show prompt and ask for confirmation
     if debug:
         print("\n" + "="*80)
@@ -522,17 +553,21 @@ def infer_profile_from_structured_data(structured_data: str, username: str, use_
         print(structured_data[:2000] + ("..." if len(structured_data) > 2000 else ""))
         print("\n" + "-"*80)
         print(f"Total input length: {len(total_input):,} characters")
-        print(f"Estimated tokens: {token_estimate:,}")
+        print(f"Estimated tokens: {token_count:,}")
         print("="*80)
-        
-        if not click.confirm("Send this prompt to CLOUD_LLM?"):
+
+    if token_count > TOKEN_CONFIRM_THRESHOLD:
+        estimated_cost = (token_count / 1_000_000) * 0.40
+        click.echo(f"Token count: {token_count:,}")
+        click.echo(f"Estimated cost: ${estimated_cost:.4f}")
+        if not click.confirm("Continue with the comprehensive analysis?"):
             click.echo("Analysis cancelled.")
             return
     
     # Create cache key from input content
     cache_key = get_cache_key(total_input)
 
-    click.echo(f"Analyzing comprehensive user data with {CLOUD_LLM} (estimated {token_estimate:,} tokens)...")
+    click.echo(f"Analyzing comprehensive user data with {CLOUD_LLM} (estimated {token_count:,} tokens)...")
     
     messages = [
         SystemMessage(prompt),
@@ -550,5 +585,5 @@ def infer_profile_from_structured_data(structured_data: str, username: str, use_
     print("Usage:")
     print(json.dumps(result['usage_metadata'], indent=2))
     print("\n--------------------")
-    print(f"Pre-send token count: {token_estimate}")
+    print(f"Pre-send token count: {token_count}")
 

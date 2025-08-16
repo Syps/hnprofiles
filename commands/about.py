@@ -31,9 +31,12 @@ def about(username, nocache, debug):
     # Step 3: Scrape HN profile page
     click.echo("Scraping HN profile page...")
     profile_data = scrape_hn_profile(username, use_cache)
+
+    print("\n" + "-"*80)
+    print("Profile data:")
+    print(profile_data)
     
     # Step 4: Detect personal blog from profile
-    blog_url = None
     blog_content = None
     if profile_data.get('about'):
         blog_url = detect_personal_blog(profile_data['about'])
@@ -62,6 +65,12 @@ def about(username, nocache, debug):
         structured_data += f"About: {profile_data['about']}\n"
     
     structured_data += "\n\n## Blog Content\n"
+    print("\n" + "-"*80)
+    print("Blog Content:")
+    print(blog_content)
+    if not click.confirm("Approve?"):
+        click.echo("Cancelled.")
+        return
     if blog_content:
         structured_data += blog_content
     else:
@@ -69,14 +78,7 @@ def about(username, nocache, debug):
     
     # Step 7: Check token count before analysis
     token_count = count_tokens_for_input(structured_data)
-    
-    if token_count > TOKEN_CONFIRM_THRESHOLD:
-        estimated_cost = (token_count / 1_000_000) * 0.40
-        click.echo(f"Token count: {token_count:,}")
-        click.echo(f"Estimated cost: ${estimated_cost:.4f}")
-        if not click.confirm("Continue with the comprehensive analysis?"):
-            click.echo("Analysis cancelled.")
-            return
+
     
     # Step 8: Run comprehensive analysis
     infer_profile_from_structured_data(structured_data, username, use_cache, debug)
